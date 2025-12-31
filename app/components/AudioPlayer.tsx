@@ -4,10 +4,12 @@ import { useRef, useEffect, useState } from 'react';
 
 interface AudioPlayerProps {
   audioUrl: string | null;
-  text?: string; // Text for browser TTS fallback
+  text?: string; // Text for sentence-level playback (browser TTS)
   playbackRate?: number;
   onPlayStateChange?: (isPlaying: boolean) => void;
+  onSentenceEnd?: () => void; // Callback when sentence audio ends
   errorMessage?: string; // Error message to display
+  autoPlay?: boolean; // Auto-start playback
 }
 
 export default function AudioPlayer({
@@ -15,7 +17,9 @@ export default function AudioPlayer({
   text,
   playbackRate = 1.0,
   onPlayStateChange,
+  onSentenceEnd,
   errorMessage,
+  autoPlay = false,
 }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -42,6 +46,8 @@ export default function AudioPlayer({
     const handleEnded = () => {
       setIsPlaying(false);
       onPlayStateChange?.(false);
+      // Trigger sentence end callback for auto-advance
+      onSentenceEnd?.();
     };
 
     const handleError = () => {
@@ -61,17 +67,47 @@ export default function AudioPlayer({
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
     };
-  }, [playbackRate, onPlayStateChange]);
+  }, [playbackRate, onPlayStateChange, onSentenceEnd]);
 
   useEffect(() => {
-    // Reset error state when audio URL or text changes
+    // Reset error state when audio URL changes
     setHasError(false);
     setIsPlaying(false);
     setUseBrowserTTS(false);
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
-  }, [audioUrl, text]);
+  }, [audioUrl]);
+
+  // Handle text changes - don't reset isPlaying if we're in continuous playback
+  useEffect(() => {
+    // Only cancel speech if we're not in auto-play mode (continuous playback)
+    // If autoPlay is true, we want to continue playing the new text
+    if (!autoPlay && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      setIsPlaying(false);
+    }
+  }, [text, autoPlay]);
+
+  // Auto-play when autoPlay is true and we have text
+  // This should trigger both when autoPlay first becomes true AND when text changes during continuous playback
+  useEffect(() => {
+    if (autoPlay && text && !audioUrl && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      // Stop any existing speech first to avoid overlap
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        speechSynthesisRef.current = null;
+      }
+      // Small delay to ensure component is ready and previous speech is fully stopped
+      const timer = setTimeout(() => {
+        // Always play when autoPlay is true and text is available
+        // The previous speech has been cancelled, so we can safely start new playback
+        playBrowserTTS();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPlay, text, audioUrl]);
 
   useEffect(() => {
     // Update playback rate for browser TTS
@@ -131,6 +167,11 @@ export default function AudioPlayer({
       setIsPlaying(false);
       onPlayStateChange?.(false);
       speechSynthesisRef.current = null;
+      // Trigger sentence end callback for auto-advance
+      // Use setTimeout to ensure state updates are processed first
+      setTimeout(() => {
+        onSentenceEnd?.();
+      }, 0);
     };
     utterance.onerror = () => {
       setIsPlaying(false);

@@ -14,15 +14,23 @@ export interface VisualAsset {
   alt: string; // Description for accessibility
 }
 
+// Scene visual mapping (for serialization)
+export interface SceneVisualMap {
+  [sceneId: number]: VisualAsset[];
+}
+
 export interface ParagraphAssets {
   paragraphId: string;
   audioUrl: string | null; // URL to TTS audio or null if failed
-  visuals: VisualAsset[]; // Array of 1-3 visuals
-  keywords: string[]; // Extracted keywords used for search
+  visuals: VisualAsset[]; // Array of 1-3 visuals (legacy, for backward compatibility)
+  keywords: string[]; // Extracted keywords used for search (legacy)
+  sentencePlans: SentencePlan[]; // Sentence-level visual plans
+  sceneVisuals: SceneVisualMap; // Map of sceneId to visuals (object for JSON serialization)
   errors?: {
     tts?: string;
     giphy?: string;
     unsplash?: string;
+    visualPlan?: string;
   };
 }
 

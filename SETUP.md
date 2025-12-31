@@ -18,7 +18,28 @@ This guide will help you set up the API keys needed for the Visual Reading Compa
 
 ## Getting API Keys
 
-### 1. Google Cloud Text-to-Speech API
+### 1. Google Gemini API Key
+
+**Required for:** AI-powered visual planning (sentence-level visual selection)
+
+**Steps:**
+1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Sign in with your Google account
+3. Click **"Create API Key"** or **"Get API Key"**
+4. Select or create a Google Cloud project (if prompted)
+5. Copy the API key that's generated
+6. Paste it in `.env.local` as `GEMINI_API_KEY`
+
+**Free Tier:**
+- Generous free tier with rate limits
+- Perfect for development and personal use
+- No credit card required
+
+**Note:** The Gemini API is essential for the video-like experience. Without it, the app will fall back to keyword-based visual selection, which is less intelligent.
+
+---
+
+### 2. Google Cloud Text-to-Speech API
 
 **Required for:** High-quality text-to-speech audio
 
@@ -42,7 +63,7 @@ This guide will help you set up the API keys needed for the Visual Reading Compa
 
 ---
 
-### 2. Giphy API Key
+### 3. Giphy API Key
 
 **Required for:** Animated GIFs
 
@@ -61,7 +82,7 @@ This guide will help you set up the API keys needed for the Visual Reading Compa
 
 ---
 
-### 3. Unsplash Access Key
+### 4. Unsplash Access Key
 
 **Required for:** High-quality images
 
@@ -82,7 +103,9 @@ This guide will help you set up the API keys needed for the Visual Reading Compa
 
 ---
 
-## Minimal Setup (Browser TTS Only)
+## Minimal Setup
+
+### Option 1: Browser TTS Only (No API Keys)
 
 If you want to test the app without setting up any API keys:
 
@@ -90,7 +113,16 @@ If you want to test the app without setting up any API keys:
 2. Visuals won't be available, but you can still read the text
 3. Just start the app: `npm run dev`
 
-To get visuals, you'll need at least one of the visual API keys (Giphy or Unsplash).
+### Option 2: Full Experience (Recommended)
+
+For the best experience, you'll need:
+
+1. **Gemini API Key** (Required) - For intelligent visual planning
+2. **Giphy API Key** (Recommended) - For animated GIFs
+3. **Unsplash Access Key** (Recommended) - For high-quality images
+4. **Google Cloud TTS API Key** (Optional) - For high-quality TTS (browser TTS works as fallback)
+
+The app will work with just the Gemini API key, but visuals will be limited. Adding Giphy and/or Unsplash keys will provide better visual results.
 
 ---
 
@@ -117,7 +149,8 @@ After adding your API keys:
 
 ### "Invalid API key" or "401/403 errors"
 - Check that you copied the full key without extra spaces
-- For Google Cloud: Make sure the Text-to-Speech API is enabled
+- For Gemini: Make sure you're using the API key from Google AI Studio, not Google Cloud Console
+- For Google Cloud TTS: Make sure the Text-to-Speech API is enabled
 - For Giphy: Make sure you're using the API key, not the App ID
 - For Unsplash: Make sure you're using the Access Key, not the Secret Key
 
@@ -129,6 +162,8 @@ After adding your API keys:
 ### Visuals not showing even with API keys
 - Check the browser console for specific error messages
 - Verify the API keys are correct
+- **Most importantly**: Make sure you have the **Gemini API key** configured - it's required for visual planning
+- If Gemini API fails, the app falls back to keyword-based visuals (less intelligent)
 - Make sure the keywords extracted from your text are searchable (some very technical terms might not have results)
 
 ---
@@ -146,6 +181,7 @@ After adding your API keys:
 - Check the [README.md](./README.md) for general information
 - Review the error messages in the app - they often tell you exactly what's wrong
 - For API-specific issues, check the official documentation:
+  - [Google Gemini API](https://ai.google.dev/docs)
   - [Google Cloud TTS](https://cloud.google.com/text-to-speech/docs)
   - [Giphy API](https://developers.giphy.com/docs/)
   - [Unsplash API](https://unsplash.com/documentation)

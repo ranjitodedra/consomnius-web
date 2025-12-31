@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { Paragraph } from '@/lib/types';
 import TextInput from './components/TextInput';
-import ParagraphReader from './components/ParagraphReader';
+import VideoPlayer from './components/VideoPlayer';
 
 export default function Home() {
   const [paragraphs, setParagraphs] = useState<Paragraph[]>([]);
@@ -47,10 +47,10 @@ export default function Home() {
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <h1 className="text-2xl font-bold text-gray-900">
-            Visual Reading Companion
+            AI Video Reading Assistant
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Transform text into a visual and audio reading experience
+            Transform text into a video-like experience with synchronized subtitles and visuals
           </p>
         </div>
       </header>
@@ -65,12 +65,13 @@ export default function Home() {
                 For the best experience, configure API keys in <code className="bg-blue-100 px-1 rounded">.env.local</code>:
               </p>
               <ul className="text-blue-800 text-sm list-disc list-inside space-y-1">
+                <li><strong>Gemini API</strong> - For intelligent visual planning (required for best experience)</li>
                 <li><strong>Google Cloud TTS</strong> - For high-quality text-to-speech (or use browser TTS fallback)</li>
                 <li><strong>Giphy API</strong> - For animated GIFs</li>
                 <li><strong>Unsplash API</strong> - For relevant images</li>
               </ul>
               <p className="text-blue-700 text-xs mt-2">
-                The app will work without API keys using browser TTS, but visuals won't be available.
+                <strong>Note:</strong> Gemini API key is required for intelligent visual planning. Without it, the app will fall back to basic keyword-based visuals. Get your key from <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="underline">Google AI Studio</a>.
               </p>
             </div>
             <TextInput onProcess={handleProcessText} isLoading={isProcessing} />
@@ -93,7 +94,7 @@ export default function Home() {
                 Process New Text
               </button>
             </div>
-            <ParagraphReader paragraphs={paragraphs} />
+            <VideoPlayer paragraphs={paragraphs} />
           </div>
         )}
       </main>

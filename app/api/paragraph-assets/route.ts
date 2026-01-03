@@ -4,7 +4,7 @@ import { generateTTS, base64ToDataUrl } from '@/lib/tts';
 import { fetchGiphyGifs } from '@/lib/giphy';
 import { fetchUnsplashImages } from '@/lib/unsplash';
 import { planVisualsForParagraph } from '@/lib/visualPlanner';
-import { ParagraphAssetsRequest, ParagraphAssetsResponse, VisualAsset, SceneVisualMap } from '@/lib/types';
+import { ParagraphAssetsRequest, ParagraphAssetsResponse, VisualAsset, SceneVisualMap, ChunkPlan } from '@/lib/types';
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,7 +30,8 @@ export async function POST(request: NextRequest) {
     const visuals: VisualAsset[] = []; // Legacy visuals array
     const sceneVisuals: SceneVisualMap = {}; // New scene-based visuals
     let audioUrl: string | null = null;
-    let sentencePlans: any[] = [];
+    let sentencePlans: any[] = []; // Legacy
+    let chunkPlans: ChunkPlan[] = []; // New chunk-based plans
     const errors: { tts?: string; giphy?: string; unsplash?: string; visualPlan?: string } = {};
 
     // Fetch TTS audio (with timeout and error handling)
@@ -64,21 +65,30 @@ export async function POST(request: NextRequest) {
           setTimeout(() => reject(new Error('Visual plan timeout')), 30000)
         );
 
-        sentencePlans = await Promise.race([planPromise, timeoutPromise]) as any[];
+        chunkPlans = await Promise.race([planPromise, timeoutPromise]) as ChunkPlan[];
 
         // Step 2: Fetch visuals for each unique scene
-        const uniqueScenes = new Map<number, { visualType: 'gif' | 'image'; queries: string[] }>();
+        // Use the new isNewScene field to identify scene starts
+        const uniqueScenes = new Map<number, { visualType: 'gif' | 'image'; queries: string[]; confidence: number }>();
         
-        for (const plan of sentencePlans) {
-          if (plan.displayStyle === 'visual' && plan.visualType && plan.visualQueries.length > 0) {
-            if (!uniqueScenes.has(plan.sceneId)) {
+        for (const plan of chunkPlans) {
+          if (plan.displayStyle === 'visual' && plan.visualType && plan.isNewScene) {
+            // This chunk starts a new scene - it should have queries
+            if (plan.visualQueries.length > 0 && !uniqueScenes.has(plan.sceneId)) {
               uniqueScenes.set(plan.sceneId, {
                 visualType: plan.visualType,
                 queries: plan.visualQueries,
+                confidence: plan.visualChangeConfidence,
               });
             }
           }
         }
+        
+        // Log scene planning info for debugging
+        console.log(`Visual plan: ${chunkPlans.length} chunks, ${uniqueScenes.size} unique scenes`);
+        chunkPlans.forEach((p, i) => {
+          console.log(`  [${i}] scene=${p.sceneId} new=${p.isNewScene} conf=${p.visualChangeConfidence.toFixed(2)} label=${p.semanticLabel}: "${p.chunkText.substring(0, 30)}..."`);
+        });
 
         // Step 3: Fetch visuals for each scene
         for (const [sceneId, sceneInfo] of uniqueScenes.entries()) {
@@ -240,7 +250,8 @@ export async function POST(request: NextRequest) {
         audioUrl,
         visuals: visuals.slice(0, 3), // Legacy: Limit to 3 visuals max
         keywords, // Legacy
-        sentencePlans: sentencePlans.length > 0 ? sentencePlans : [],
+        sentencePlans: sentencePlans.length > 0 ? sentencePlans : [], // Legacy
+        chunkPlans: chunkPlans.length > 0 ? chunkPlans : [], // New chunk-based plans
         sceneVisuals: sceneVisuals,
         errors: Object.keys(errors).length > 0 ? errors : undefined,
       },

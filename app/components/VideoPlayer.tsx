@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Paragraph, ParagraphAssets, SentencePlan, VisualAsset, SceneVisualMap } from '@/lib/types';
+import { Paragraph, ParagraphAssets, ChunkPlan, VisualAsset, SceneVisualMap, SemanticLabel } from '@/lib/types';
 import VisualDisplay from './VisualDisplay';
 import AudioPlayer from './AudioPlayer';
 
@@ -15,7 +15,7 @@ export default function VideoPlayer({
   onAssetsLoaded,
 }: VideoPlayerProps) {
   const [currentParagraphIndex, setCurrentParagraphIndex] = useState(0);
-  const [currentSentenceIndex, setCurrentSentenceIndex] = useState(0);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [assetsMap, setAssetsMap] = useState<Map<string, ParagraphAssets>>(new Map());
   const [loadingAssets, setLoadingAssets] = useState<Set<string>>(new Set());
   const [isPlaying, setIsPlaying] = useState(false);
@@ -26,24 +26,48 @@ export default function VideoPlayer({
     ? assetsMap.get(currentParagraph.id)
     : null;
 
-  // Get all sentences for current paragraph
-  const allSentences: SentencePlan[] = currentAssets?.sentencePlans || [];
-  const currentSentence = allSentences[currentSentenceIndex];
-  const currentSceneId = currentSentence?.sceneId ?? -1;
+  // Get all chunks for current paragraph (prefer chunkPlans, fallback to sentencePlans for backward compatibility)
+  const allChunks: ChunkPlan[] = currentAssets?.chunkPlans || 
+    (currentAssets?.sentencePlans?.map((sp, idx) => ({
+      index: sp.index,
+      chunkText: sp.subtitleText,
+      sceneId: sp.sceneId,
+      isNewScene: idx === 0 || sp.sceneId !== currentAssets?.sentencePlans?.[idx - 1]?.sceneId,
+      semanticLabel: 'neutral' as SemanticLabel,
+      visualChangeConfidence: idx === 0 ? 1.0 : 0.5,
+      displayStyle: sp.displayStyle,
+      visualType: sp.visualType,
+      visualQueries: sp.visualQueries,
+      pace: sp.pace,
+    })) as ChunkPlan[]) || [];
+  const currentChunk = allChunks[currentChunkIndex];
+  const currentSceneId = currentChunk?.sceneId ?? -1;
+  const currentSemanticLabel = currentChunk?.semanticLabel ?? 'neutral';
   // sceneVisuals is an object (SceneVisualMap), not a Map
   const sceneVisuals = currentAssets?.sceneVisuals || {};
   const currentVisual = sceneVisuals[currentSceneId]?.[0] || null;
+  const hasVisual = !!currentVisual && currentChunk?.displayStyle !== 'text_only';
 
-  // Dynamic GIF positioning - alternate between positions for visual interest
-  const getGifPosition = (): 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' => {
-    const positions: Array<'top-right' | 'top-left' | 'bottom-right' | 'bottom-left'> = [
-      'top-right',
-      'top-left',
-      'bottom-right',
-      'bottom-left',
-    ];
-    // Use sentence index to determine position (cycles through positions)
-    return positions[currentSentenceIndex % positions.length];
+  // Get text color based on semantic label for visual emphasis
+  const getTextColorClass = (label: SemanticLabel): string => {
+    switch (label) {
+      case 'emotional_positive':
+        return 'text-green-200';
+      case 'emotional_negative':
+        return 'text-red-200';
+      case 'dramatic':
+        return 'text-yellow-200';
+      case 'humorous':
+        return 'text-pink-200';
+      case 'warning':
+        return 'text-orange-200';
+      case 'emphasizing':
+        return 'text-cyan-200';
+      case 'questioning':
+        return 'text-purple-200';
+      default:
+        return 'text-white';
+    }
   };
 
   // Load assets for current paragraph
@@ -90,6 +114,7 @@ export default function VideoPlayer({
             visuals: [],
             keywords: [],
             sentencePlans: [],
+            chunkPlans: [],
             sceneVisuals: {},
             errors: {
               visualPlan: error instanceof Error ? error.message : 'Failed to load assets',
@@ -137,82 +162,102 @@ export default function VideoPlayer({
     }
   }, [currentParagraphIndex, paragraphs, assetsMap, loadingAssets]);
 
-  // Calculate duration for a sentence based on pace and text length
-  const getSentenceDuration = useCallback((sentence: SentencePlan | undefined): number => {
-    if (!sentence) return 3000;
+  // Calculate duration for a chunk based on pace and word count
+  const getChunkDuration = useCallback((chunk: ChunkPlan | undefined): number => {
+    if (!chunk) return 3000;
 
-    const baseDuration = Math.max(2000, sentence.subtitleText.length * 100);
+    // Calculate based on word count (chunks are 5-9 words)
+    const wordCount = chunk.chunkText.split(/\s+/).length;
+    const baseDuration = Math.max(2000, wordCount * 200); // ~200ms per word
     const paceMultiplier = {
       slow: 1.5,
       normal: 1.0,
       fast: 0.7,
-    }[sentence.pace];
+    }[chunk.pace];
 
     return baseDuration * paceMultiplier / playbackRate;
   }, [playbackRate]);
 
-  // Handle sentence end - auto-advance to next sentence
-  const handleSentenceEnd = useCallback(() => {
-    if (currentSentenceIndex < allSentences.length - 1) {
-      setCurrentSentenceIndex(currentSentenceIndex + 1);
+  // Handle chunk end - auto-advance to next chunk
+  const handleChunkEnd = useCallback(() => {
+    if (currentChunkIndex < allChunks.length - 1) {
+      setCurrentChunkIndex(currentChunkIndex + 1);
     } else if (currentParagraphIndex < paragraphs.length - 1) {
       // Move to next paragraph
       setCurrentParagraphIndex(currentParagraphIndex + 1);
-      setCurrentSentenceIndex(0);
+      setCurrentChunkIndex(0);
     } else {
       // End of content
       setIsPlaying(false);
     }
-  }, [currentSentenceIndex, allSentences.length, currentParagraphIndex, paragraphs.length]);
+  }, [currentChunkIndex, allChunks.length, currentParagraphIndex, paragraphs.length]);
 
-  // Reset sentence index when paragraph changes
+  // Reset chunk index when paragraph changes
   useEffect(() => {
-    setCurrentSentenceIndex(0);
+    setCurrentChunkIndex(0);
   }, [currentParagraphIndex]);
 
   // Auto-play next sentence when sentence index changes and we're playing
   // The AudioPlayer component will handle auto-play via the autoPlay prop
 
-  // Calculate total duration up to a specific sentence index
-  const getTotalDurationUpTo = useCallback((paraIndex: number, sentenceIndex: number): number => {
+  // Calculate total duration up to a specific chunk index
+  const getTotalDurationUpTo = useCallback((paraIndex: number, chunkIndex: number): number => {
     let total = 0;
     for (let p = 0; p <= paraIndex; p++) {
       const para = paragraphs[p];
       if (!para) continue;
       const assets = assetsMap.get(para.id);
-      const sentences = assets?.sentencePlans || [];
-      const maxSentence = p === paraIndex ? sentenceIndex : sentences.length - 1;
+      const chunks = assets?.chunkPlans || 
+        (assets?.sentencePlans?.map(sp => ({
+          index: sp.index,
+          chunkText: sp.subtitleText,
+          sceneId: sp.sceneId,
+          displayStyle: sp.displayStyle,
+          visualType: sp.visualType,
+          visualQueries: sp.visualQueries,
+          pace: sp.pace,
+        })) as ChunkPlan[]) || [];
+      const maxChunk = p === paraIndex ? chunkIndex : chunks.length - 1;
       
-      for (let s = 0; s <= maxSentence; s++) {
-        const sentence = sentences[s];
-        if (sentence) {
-          total += getSentenceDuration(sentence);
+      for (let c = 0; c <= maxChunk; c++) {
+        const chunk = chunks[c];
+        if (chunk) {
+          total += getChunkDuration(chunk);
         }
       }
     }
     return total;
-  }, [paragraphs, assetsMap, getSentenceDuration]);
+  }, [paragraphs, assetsMap, getChunkDuration]);
 
   // Rewind 10 seconds
   const rewind10s = useCallback(() => {
-    const currentTime = getTotalDurationUpTo(currentParagraphIndex, currentSentenceIndex);
+    const currentTime = getTotalDurationUpTo(currentParagraphIndex, currentChunkIndex);
     const targetTime = Math.max(0, currentTime - 10000);
     
-    // Find the sentence at target time
+    // Find the chunk at target time
     let accumulated = 0;
     for (let p = 0; p < paragraphs.length; p++) {
       const para = paragraphs[p];
       if (!para) continue;
       const assets = assetsMap.get(para.id);
-      const sentences = assets?.sentencePlans || [];
+      const chunks = assets?.chunkPlans || 
+        (assets?.sentencePlans?.map(sp => ({
+          index: sp.index,
+          chunkText: sp.subtitleText,
+          sceneId: sp.sceneId,
+          displayStyle: sp.displayStyle,
+          visualType: sp.visualType,
+          visualQueries: sp.visualQueries,
+          pace: sp.pace,
+        })) as ChunkPlan[]) || [];
       
-      for (let s = 0; s < sentences.length; s++) {
-        const sentence = sentences[s];
-        const duration = getSentenceDuration(sentence);
+      for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c];
+        const duration = getChunkDuration(chunk);
         
         if (accumulated + duration >= targetTime) {
           setCurrentParagraphIndex(p);
-          setCurrentSentenceIndex(s);
+          setCurrentChunkIndex(c);
           return;
         }
         accumulated += duration;
@@ -221,29 +266,38 @@ export default function VideoPlayer({
     
     // If we get here, go to start
     setCurrentParagraphIndex(0);
-    setCurrentSentenceIndex(0);
-  }, [currentParagraphIndex, currentSentenceIndex, paragraphs, assetsMap, getTotalDurationUpTo, getSentenceDuration]);
+    setCurrentChunkIndex(0);
+  }, [currentParagraphIndex, currentChunkIndex, paragraphs, assetsMap, getTotalDurationUpTo, getChunkDuration]);
 
   // Skip forward 10 seconds
   const skip10s = useCallback(() => {
-    const currentTime = getTotalDurationUpTo(currentParagraphIndex, currentSentenceIndex);
+    const currentTime = getTotalDurationUpTo(currentParagraphIndex, currentChunkIndex);
     const targetTime = currentTime + 10000;
     
-    // Find the sentence at target time
+    // Find the chunk at target time
     let accumulated = 0;
     for (let p = 0; p < paragraphs.length; p++) {
       const para = paragraphs[p];
       if (!para) continue;
       const assets = assetsMap.get(para.id);
-      const sentences = assets?.sentencePlans || [];
+      const chunks = assets?.chunkPlans || 
+        (assets?.sentencePlans?.map(sp => ({
+          index: sp.index,
+          chunkText: sp.subtitleText,
+          sceneId: sp.sceneId,
+          displayStyle: sp.displayStyle,
+          visualType: sp.visualType,
+          visualQueries: sp.visualQueries,
+          pace: sp.pace,
+        })) as ChunkPlan[]) || [];
       
-      for (let s = 0; s < sentences.length; s++) {
-        const sentence = sentences[s];
-        const duration = getSentenceDuration(sentence);
+      for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c];
+        const duration = getChunkDuration(chunk);
         
         if (accumulated + duration >= targetTime) {
           setCurrentParagraphIndex(p);
-          setCurrentSentenceIndex(s);
+          setCurrentChunkIndex(c);
           return;
         }
         accumulated += duration;
@@ -253,10 +307,19 @@ export default function VideoPlayer({
     // If we get here, go to end
     const lastPara = paragraphs.length - 1;
     const lastParaAssets = assetsMap.get(paragraphs[lastPara]?.id);
-    const lastSentences = lastParaAssets?.sentencePlans || [];
+    const lastChunks = lastParaAssets?.chunkPlans || 
+      (lastParaAssets?.sentencePlans?.map(sp => ({
+        index: sp.index,
+        chunkText: sp.subtitleText,
+        sceneId: sp.sceneId,
+        displayStyle: sp.displayStyle,
+        visualType: sp.visualType,
+        visualQueries: sp.visualQueries,
+        pace: sp.pace,
+      })) as ChunkPlan[]) || [];
     setCurrentParagraphIndex(lastPara);
-    setCurrentSentenceIndex(Math.max(0, lastSentences.length - 1));
-  }, [currentParagraphIndex, currentSentenceIndex, paragraphs, assetsMap, getTotalDurationUpTo, getSentenceDuration]);
+    setCurrentChunkIndex(Math.max(0, lastChunks.length - 1));
+  }, [currentParagraphIndex, currentChunkIndex, paragraphs, assetsMap, getTotalDurationUpTo, getChunkDuration]);
 
   const togglePlayPause = useCallback(() => {
     setIsPlaying((prev) => !prev);
@@ -280,8 +343,8 @@ export default function VideoPlayer({
   }
 
   const isLoading = loadingAssets.has(currentParagraph.id);
-  const totalSentences = allSentences.length;
-  const currentSentenceNumber = currentSentenceIndex + 1;
+  const totalChunks = allChunks.length;
+  const currentChunkNumber = currentChunkIndex + 1;
 
   return (
     <div className="w-full max-w-7xl mx-auto">
@@ -289,15 +352,15 @@ export default function VideoPlayer({
       <div className="mb-4 text-center text-gray-600">
         <div className="text-sm">
           Paragraph {currentParagraphIndex + 1} of {paragraphs.length}
-          {totalSentences > 0 && (
-            <> • Sentence {currentSentenceNumber} of {totalSentences}</>
+          {totalChunks > 0 && (
+            <> • Chunk {currentChunkNumber} of {totalChunks}</>
           )}
         </div>
-        {totalSentences > 0 && (
+        {totalChunks > 0 && (
           <div className="mt-2 w-full bg-gray-200 rounded-full h-2">
             <div
               className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${(currentSentenceNumber / totalSentences) * 100}%` }}
+              style={{ width: `${(currentChunkNumber / totalChunks) * 100}%` }}
             />
           </div>
         )}
@@ -314,27 +377,42 @@ export default function VideoPlayer({
             {/* Pure black background */}
             <div className="absolute inset-0 bg-black" />
 
-            {/* Visual display as overlay */}
+            {/* Visual display as centered overlay */}
             <VisualDisplay
               visual={currentVisual}
-              displayStyle={currentSentence?.displayStyle || 'visual'}
+              displayStyle={currentChunk?.displayStyle || 'visual'}
               isLoading={false}
-              position={getGifPosition()}
             />
 
-            {/* Large centered text - Fireship style */}
-            <div className="absolute inset-0 flex items-center justify-center p-8 md:p-12 z-20">
-              <div className="text-center max-w-5xl">
-                <p 
-                  className="text-white text-4xl md:text-5xl lg:text-6xl font-bold leading-tight transition-opacity duration-300"
-                  style={{
-                    textShadow: '0 4px 12px rgba(0, 0, 0, 0.9), 0 2px 4px rgba(0, 0, 0, 0.8)',
-                  }}
-                >
-                  {currentSentence?.subtitleText || currentParagraph.text}
-                </p>
+            {/* Caption / text layout */}
+            {hasVisual ? (
+              // Small YouTube-style caption at bottom center
+              <div className="absolute inset-x-0 bottom-6 flex justify-center px-4 z-30">
+                <div className="bg-black/80 text-white text-lg md:text-xl px-4 py-2 rounded-lg shadow-lg border border-white/10 max-w-4xl w-full text-center">
+                  <span className="font-semibold">{currentChunk?.chunkText || currentParagraph.text}</span>
+                </div>
               </div>
-            </div>
+            ) : (
+              // Large centered text when no visual
+              <div className="absolute inset-0 flex items-center justify-center p-8 md:p-12 z-20">
+                <div className="text-center max-w-5xl relative">
+                  <p 
+                    className={`${getTextColorClass(currentSemanticLabel)} text-4xl md:text-5xl lg:text-6xl font-bold leading-tight transition-all duration-300`}
+                    style={{
+                      textShadow: '0 4px 12px rgba(0, 0, 0, 0.9), 0 2px 4px rgba(0, 0, 0, 0.8)',
+                    }}
+                  >
+                    {currentChunk?.chunkText || currentParagraph.text}
+                  </p>
+                  {/* Scene change indicator */}
+                  {currentChunk?.isNewScene && currentChunkIndex > 0 && (
+                    <div className="absolute top-4 left-4 text-xs text-gray-400 opacity-50">
+                      Scene {currentSceneId}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -390,13 +468,13 @@ export default function VideoPlayer({
           </button>
         </div>
 
-        {/* Audio player for sentence-level playback */}
+        {/* Audio player for chunk-level playback */}
         <div className="flex justify-center">
           <AudioPlayer
             audioUrl={null}
-            text={currentSentence?.subtitleText || currentParagraph.text}
+            text={currentChunk?.chunkText || currentParagraph.text}
             playbackRate={playbackRate}
-            onSentenceEnd={handleSentenceEnd}
+            onSentenceEnd={handleChunkEnd}
             autoPlay={isPlaying}
             errorMessage={currentAssets?.errors?.tts}
           />

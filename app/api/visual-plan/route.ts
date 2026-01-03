@@ -23,10 +23,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Call visual planner
-    const sentencePlans = await planVisualsForParagraph(paragraph);
+    const chunkPlans = await planVisualsForParagraph(paragraph);
 
     const response: VisualPlanResponse = {
-      sentencePlans,
+      chunkPlans,
     };
 
     return NextResponse.json(response);

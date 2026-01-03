@@ -1,116 +1,179 @@
 /**
  * Visual Planner Service
- * Uses Gemini LLM to plan visual presentation for paragraphs
+ * 
+ * HYBRID APPROACH:
+ * 1. Heuristic chunking (deterministic, reliable) - always produces consistent results
+ * 2. Gemini for semantic analysis only (scene detection, labels, confidence)
+ * 
+ * This ensures text is ALWAYS split correctly, while Gemini handles the "smart" parts.
  */
 
-import { splitIntoSentences } from './sentenceSplitter';
 import { callGemini } from './geminiClient';
-import { SentencePlan } from './types';
+import { splitIntoChunks, validateChunks } from './chunkSplitter';
+import { ChunkPlan, SemanticLabel } from './types';
 
-const SYSTEM_PROMPT = `You are a visual scene planner for a reading app.
+// Valid semantic labels that Gemini can return
+const VALID_SEMANTIC_LABELS: SemanticLabel[] = [
+  "counting",
+  "explaining",
+  "arguing",
+  "questioning",
+  "emphasizing",
+  "comparing",
+  "listing",
+  "storytelling",
+  "describing",
+  "concluding",
+  "transitioning",
+  "emotional_positive",
+  "emotional_negative",
+  "neutral",
+  "dramatic",
+  "humorous",
+  "warning",
+  "instructing"
+];
 
-The app reads a paragraph aloud and shows visuals (images/GIFs) behind it.
+const SYSTEM_PROMPT = `You are a visual scene planner for a reading app that creates a video-like experience.
 
-At the bottom of the screen, the user sees subtitles, one sentence or short chunk at a time,
-aligned with the read-aloud text.
+You will receive a list of TEXT CHUNKS (already split). Your job is to analyze each chunk and decide:
 
-INPUT YOU RECEIVE:
-- An ordered list of sentences from a single paragraph that will be read in that exact order.
-- Each sentence string is the exact text that will be spoken and shown as subtitles.
+1. SCENE ASSIGNMENT (sceneId):
+   - Chunks with the same sceneId share the same visual
+   - Start a NEW scene (different sceneId) when:
+     • Different actor/subject appears
+     • Action clearly changes
+     • Emotion/tone shifts dramatically
+     • Setting/location changes
+     • Topic/idea changes
+   - CONTINUE the scene (same sceneId) when:
+     • Same actor continuing action
+     • Elaborating same idea
+     • Describing same scene from different angle
+   - When uncertain: PREFER continuing current scene
 
-YOUR JOB:
-- For each sentence, decide:
-  1) Whether it should share a visual "scene" with neighboring sentences or start a new scene.
-  2) Whether this part should be visual ("visual") or only text ("text_only").
-  3) If visual, whether to use a GIF or an image.
-  4) 1–3 short, concrete visual search queries that can be sent to GIF/image APIs
-     (e.g. Giphy, Unsplash) to retrieve relevant visuals.
+2. IS NEW SCENE (isNewScene):
+   - true: This chunk starts a new mental scene
+   - false: This chunk continues the previous scene
+   - First chunk is ALWAYS isNewScene: true
 
-CONSTRAINTS:
-- You MUST NOT rewrite or invent any new script. You do NOT change the words being read.
-- You must not summarize or omit sentences.
-- You ONLY plan visuals and scene grouping.
-- Sentences that describe the same idea/theme should usually share the same sceneId so that
-  the visual remains on screen while subtitles advance.
-- When the idea or focus clearly changes, you should start a new sceneId with a new visual.
-- Use "text_only" for very abstract or generic lines where a visual would be confusing.
-- For "visual" segments, choose:
-    - "gif" for dynamic, emotional, or action-heavy content.
-    - "image" for historical facts, objects, places, or calm explanations.
+3. SEMANTIC LABEL (semanticLabel):
+   Choose ONE: counting, explaining, arguing, questioning, emphasizing, comparing,
+   listing, storytelling, describing, concluding, transitioning, emotional_positive,
+   emotional_negative, neutral, dramatic, humorous, warning, instructing
 
-JSON OUTPUT FORMAT (and nothing else):
-- You MUST return an array with one object per sentence index i.
+4. VISUAL CHANGE CONFIDENCE (visualChangeConfidence):
+   - 0.9-1.0: Definite scene change needed
+   - 0.6-0.8: Likely scene change
+   - 0.3-0.5: Uncertain
+   - 0.0-0.2: Almost certainly same scene
+
+5. DISPLAY STYLE (displayStyle):
+   - "visual": Show visual + text (most content)
+   - "text_only": Only text, no visual (very abstract concepts)
+
+6. VISUAL TYPE (visualType):
+   - "gif": For action, emotion, dynamic content
+   - "image": For facts, objects, places, calm content
+   - null: If displayStyle is "text_only"
+
+7. VISUAL QUERIES (visualQueries):
+   - 1-3 search queries (3-10 words each) for GIF/image APIs
+   - ONLY provide for chunks where isNewScene is true
+   - Empty array [] for chunks continuing a scene
+
+8. PACE:
+   - "slow": Important, emotional, complex content
+   - "normal": Regular content
+   - "fast": Quick facts, lists, transitions
+
+OUTPUT FORMAT - JSON array with one object per chunk:
 [
   {
-    "index": <integer, 0-based index into the input sentence list>,
-    "subtitleText": "<exact sentence text from input>",
-    "sceneId": <integer, same number means same visual scene>,
-    "displayStyle": "visual" | "text_only",
-    "visualType": "gif" | "image" | null,
-    "visualQueries": ["<short visual search query 1>", "<query 2>"],
-    "pace": "slow" | "normal" | "fast"
+    "index": 0,
+    "sceneId": 1,
+    "isNewScene": true,
+    "semanticLabel": "explaining",
+    "visualChangeConfidence": 0.95,
+    "displayStyle": "visual",
+    "visualType": "gif",
+    "visualQueries": ["teacher explaining concept", "person at whiteboard"],
+    "pace": "normal"
   },
-  ...
+  {
+    "index": 1,
+    "sceneId": 1,
+    "isNewScene": false,
+    "semanticLabel": "explaining",
+    "visualChangeConfidence": 0.1,
+    "displayStyle": "visual",
+    "visualType": "gif",
+    "visualQueries": [],
+    "pace": "normal"
+  }
 ]
 
-Rules:
-- There must be exactly one object per input sentence, with matching index.
-- subtitleText MUST be identical to the sentence at that index (ignoring leading/trailing spaces).
-- visualQueries must be 3–10 words and describe a concrete scene (people, objects, setting).
-- Output valid JSON only. No markdown, no comments, no extra text.`;
+RULES:
+- Return EXACTLY one object per input chunk
+- Index must match the chunk's position (0, 1, 2, ...)
+- DO NOT include chunkText in output - we already have it
+- Output valid JSON only. No markdown, no comments.`;
 
 /**
- * Plans visuals for a paragraph using Gemini LLM
- * @param paragraph - The paragraph text to plan visuals for
- * @returns Array of SentencePlan objects
+ * Plans visuals for a paragraph using hybrid approach:
+ * 1. Split text into chunks (deterministic heuristic)
+ * 2. Send chunks to Gemini for semantic analysis
+ * 
+ * @param paragraph - The raw paragraph text to process
+ * @returns Array of ChunkPlan objects
  */
-export async function planVisualsForParagraph(paragraph: string): Promise<SentencePlan[]> {
+export async function planVisualsForParagraph(paragraph: string): Promise<ChunkPlan[]> {
   if (!paragraph || paragraph.trim().length === 0) {
     throw new Error('Paragraph cannot be empty');
   }
 
-  // Step 1: Split paragraph into sentences
-  const sentences = splitIntoSentences(paragraph);
+  const normalizedParagraph = paragraph.replace(/\s+/g, ' ').trim();
 
-  if (sentences.length === 0) {
-    throw new Error('No sentences found in paragraph');
+  // STEP 1: Split into chunks using deterministic heuristic
+  const chunks = splitIntoChunks(normalizedParagraph);
+  
+  if (chunks.length === 0) {
+    throw new Error('No chunks produced from paragraph');
   }
 
-  // Step 2: Construct prompt with sentences
-  const sentencesList = sentences
-    .map((sentence, index) => `[${index}] ${sentence}`)
+  // Validate chunks reconstruct to original
+  if (!validateChunks(normalizedParagraph, chunks)) {
+    console.warn('Warning: Chunks do not perfectly reconstruct original text');
+    console.warn('Original:', normalizedParagraph);
+    console.warn('Reconstructed:', chunks.join(' '));
+  }
+
+  // STEP 2: Send chunks to Gemini for semantic analysis
+  const chunksList = chunks
+    .map((chunk, index) => `[${index}] "${chunk}"`)
     .join('\n');
 
   const fullPrompt = `${SYSTEM_PROMPT}
 
-SENTENCES:
+TEXT CHUNKS TO ANALYZE:
 
-${sentencesList}
+${chunksList}
 
-Now return the JSON array of SentencePlan objects as specified above.`;
+Return JSON array with semantic analysis for each chunk (index 0 to ${chunks.length - 1}).`;
 
-  // Step 3: Call Gemini API with timeout
-  let responseText: string;
+  let geminiPlans: any[] | null = null;
+
   try {
     const timeoutPromise = new Promise<string>((_, reject) =>
       setTimeout(() => reject(new Error('Gemini API timeout after 30 seconds')), 30000)
     );
 
-    responseText = await Promise.race([
+    const responseText = await Promise.race([
       callGemini(fullPrompt),
       timeoutPromise,
     ]);
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to get response from Gemini: ${error.message}`);
-    }
-    throw new Error('Failed to get response from Gemini');
-  }
 
-  // Step 4: Parse JSON response
-  let sentencePlans: SentencePlan[];
-  try {
-    // Clean up response - remove markdown code blocks if present
+    // Parse JSON response
     let cleanedResponse = responseText.trim();
     if (cleanedResponse.startsWith('```json')) {
       cleanedResponse = cleanedResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -118,103 +181,118 @@ Now return the JSON array of SentencePlan objects as specified above.`;
       cleanedResponse = cleanedResponse.replace(/^```\s*/, '').replace(/\s*```$/, '');
     }
 
-    sentencePlans = JSON.parse(cleanedResponse);
+    geminiPlans = JSON.parse(cleanedResponse);
+
+    if (!Array.isArray(geminiPlans)) {
+      console.warn('Gemini response is not an array, using defaults');
+      geminiPlans = null;
+    } else if (geminiPlans.length !== chunks.length) {
+      console.warn(`Gemini returned ${geminiPlans.length} plans for ${chunks.length} chunks, using defaults for missing`);
+    }
   } catch (error) {
-    throw new Error(`Failed to parse Gemini response as JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.warn('Gemini semantic analysis failed:', error instanceof Error ? error.message : 'Unknown error');
+    console.warn('Using default semantic values');
+    geminiPlans = null;
   }
 
-  // Step 5: Validate response
-  if (!Array.isArray(sentencePlans)) {
-    throw new Error('Gemini response is not an array');
-  }
+  // STEP 3: Build ChunkPlan array - chunks are guaranteed, semantic analysis is best-effort
+  const chunkPlans: ChunkPlan[] = [];
+  let lastSceneId = 0;
+  const seenSceneIds = new Set<number>();
 
-  if (sentencePlans.length !== sentences.length) {
-    throw new Error(
-      `Sentence plan count (${sentencePlans.length}) does not match sentence count (${sentences.length})`
-    );
-  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkText = chunks[i];
+    const geminiPlan = geminiPlans?.[i];
 
-  // Step 6: Validate each sentence plan
-  const validatedPlans: SentencePlan[] = [];
+    // Get Gemini values or use smart defaults
+    let sceneId: number;
+    let isNewScene: boolean;
+    let semanticLabel: SemanticLabel;
+    let visualChangeConfidence: number;
+    let displayStyle: 'visual' | 'text_only';
+    let visualType: 'gif' | 'image' | null;
+    let visualQueries: string[];
+    let pace: 'slow' | 'normal' | 'fast';
 
-  for (let i = 0; i < sentencePlans.length; i++) {
-    const plan = sentencePlans[i];
-    const originalSentence = sentences[i].trim();
-
-    // Validate required fields
-    if (typeof plan.index !== 'number') {
-      throw new Error(`Sentence plan at position ${i} is missing or has invalid index`);
-    }
-
-    if (plan.index !== i) {
-      throw new Error(`Sentence plan index mismatch: expected ${i}, got ${plan.index}`);
-    }
-
-    if (typeof plan.subtitleText !== 'string') {
-      throw new Error(`Sentence plan at index ${i} is missing subtitleText`);
-    }
-
-    // Validate subtitleText matches original sentence (allowing whitespace differences)
-    const planSubtitle = plan.subtitleText.trim();
-    if (planSubtitle !== originalSentence) {
-      // Allow only whitespace differences, not semantic changes
-      const normalizedPlan = planSubtitle.replace(/\s+/g, ' ');
-      const normalizedOriginal = originalSentence.replace(/\s+/g, ' ');
+    if (geminiPlan && typeof geminiPlan === 'object') {
+      // Use Gemini values with validation
+      sceneId = typeof geminiPlan.sceneId === 'number' ? geminiPlan.sceneId : (i === 0 ? 1 : lastSceneId);
+      isNewScene = typeof geminiPlan.isNewScene === 'boolean' ? geminiPlan.isNewScene : !seenSceneIds.has(sceneId);
       
-      if (normalizedPlan !== normalizedOriginal) {
-        throw new Error(
-          `Sentence plan at index ${i} has subtitleText mismatch.\n` +
-          `Expected: "${originalSentence}"\n` +
-          `Got: "${planSubtitle}"`
-        );
-      }
+      semanticLabel = VALID_SEMANTIC_LABELS.includes(geminiPlan.semanticLabel) 
+        ? geminiPlan.semanticLabel 
+        : 'neutral';
       
-      // Fix whitespace differences
-      plan.subtitleText = originalSentence;
-    }
-
-    // Validate other required fields
-    if (typeof plan.sceneId !== 'number') {
-      throw new Error(`Sentence plan at index ${i} is missing sceneId`);
-    }
-
-    if (plan.displayStyle !== 'visual' && plan.displayStyle !== 'text_only') {
-      throw new Error(`Sentence plan at index ${i} has invalid displayStyle: ${plan.displayStyle}`);
-    }
-
-    if (plan.displayStyle === 'visual') {
-      if (plan.visualType !== 'gif' && plan.visualType !== 'image') {
-        throw new Error(`Sentence plan at index ${i} has invalid visualType for visual display: ${plan.visualType}`);
-      }
-      if (!Array.isArray(plan.visualQueries) || plan.visualQueries.length === 0 || plan.visualQueries.length > 3) {
-        throw new Error(`Sentence plan at index ${i} must have 1-3 visualQueries`);
-      }
+      visualChangeConfidence = typeof geminiPlan.visualChangeConfidence === 'number' &&
+        geminiPlan.visualChangeConfidence >= 0 && geminiPlan.visualChangeConfidence <= 1
+        ? geminiPlan.visualChangeConfidence
+        : (isNewScene ? 0.8 : 0.2);
+      
+      displayStyle = geminiPlan.displayStyle === 'text_only' ? 'text_only' : 'visual';
+      
+      visualType = displayStyle === 'visual' 
+        ? (geminiPlan.visualType === 'image' ? 'image' : 'gif')
+        : null;
+      
+      visualQueries = Array.isArray(geminiPlan.visualQueries) 
+        ? geminiPlan.visualQueries.filter((q: any) => typeof q === 'string').slice(0, 3)
+        : [];
+      
+      pace = ['slow', 'normal', 'fast'].includes(geminiPlan.pace) ? geminiPlan.pace : 'normal';
     } else {
-      // text_only should have null visualType
-      if (plan.visualType !== null) {
-        plan.visualType = null;
-      }
-      if (!Array.isArray(plan.visualQueries) || plan.visualQueries.length > 0) {
-        plan.visualQueries = [];
-      }
+      // Use smart defaults when Gemini fails
+      sceneId = i === 0 ? 1 : lastSceneId;
+      isNewScene = i === 0;
+      semanticLabel = 'neutral';
+      visualChangeConfidence = i === 0 ? 1.0 : 0.2;
+      displayStyle = 'visual';
+      visualType = 'gif';
+      visualQueries = [];
+      pace = 'normal';
     }
 
-    if (plan.pace !== 'slow' && plan.pace !== 'normal' && plan.pace !== 'fast') {
-      throw new Error(`Sentence plan at index ${i} has invalid pace: ${plan.pace}`);
+    // First chunk is always a new scene
+    if (i === 0) {
+      isNewScene = true;
+      sceneId = 1;
     }
 
-    // Validate visualQueries are strings
-    if (Array.isArray(plan.visualQueries)) {
-      for (let j = 0; j < plan.visualQueries.length; j++) {
-        if (typeof plan.visualQueries[j] !== 'string') {
-          throw new Error(`Sentence plan at index ${i}, visualQuery ${j} is not a string`);
-        }
-      }
+    // Ensure isNewScene and sceneId are consistent
+    if (isNewScene && sceneId === lastSceneId && i > 0) {
+      sceneId = lastSceneId + 1;
+    }
+    if (!isNewScene && sceneId !== lastSceneId) {
+      sceneId = lastSceneId;
     }
 
-    validatedPlans.push(plan as SentencePlan);
+    // New scenes need visual queries
+    if (isNewScene && displayStyle === 'visual' && visualQueries.length === 0) {
+      // Generate default query from chunk text
+      const words = chunkText.split(/\s+/).slice(0, 5).join(' ');
+      visualQueries = [words];
+    }
+
+    // Continuing scenes shouldn't have queries
+    if (!isNewScene) {
+      visualQueries = [];
+    }
+
+    seenSceneIds.add(sceneId);
+    lastSceneId = sceneId;
+
+    chunkPlans.push({
+      index: i,
+      chunkText,
+      sceneId,
+      isNewScene,
+      semanticLabel,
+      visualChangeConfidence,
+      displayStyle,
+      visualType,
+      visualQueries,
+      pace,
+    });
   }
 
-  return validatedPlans;
+  return chunkPlans;
 }
-

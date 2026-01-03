@@ -68,6 +68,9 @@ export default function ParagraphReader({
             audioUrl: null,
             visuals: [],
             keywords: extractKeywords(currentParagraph.text),
+            sentencePlans: [],
+            chunkPlans: [],
+            sceneVisuals: {},
           });
           return newMap;
         });

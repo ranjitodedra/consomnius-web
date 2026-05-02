@@ -90,6 +90,25 @@ export async function POST(request: NextRequest) {
           console.log(`  [${i}] scene=${p.sceneId} new=${p.isNewScene} conf=${p.visualChangeConfidence.toFixed(2)} label=${p.semanticLabel}: "${p.chunkText.substring(0, 30)}..."`);
         });
 
+        // Step 2.5: Randomly assign 50/50 split between images and GIFs
+        // Convert Map to array, shuffle, and reassign visual types
+        if (uniqueScenes.size > 0) {
+          const scenesArray = Array.from(uniqueScenes.entries());
+          // Shuffle randomly
+          scenesArray.sort(() => Math.random() - 0.5);
+          // Assign 50/50 split: first half as 'image', second half as 'gif'
+          const halfPoint = Math.ceil(scenesArray.length / 2);
+          scenesArray.forEach(([sceneId, sceneInfo], index) => {
+            sceneInfo.visualType = index < halfPoint ? 'image' : 'gif';
+          });
+          // Rebuild Map with updated types
+          uniqueScenes.clear();
+          scenesArray.forEach(([sceneId, sceneInfo]) => {
+            uniqueScenes.set(sceneId, sceneInfo);
+          });
+          console.log(`Assigned ${halfPoint} scenes as images, ${scenesArray.length - halfPoint} scenes as GIFs`);
+        }
+
         // Step 3: Fetch visuals for each scene
         for (const [sceneId, sceneInfo] of uniqueScenes.entries()) {
           const sceneAssets: VisualAsset[] = [];
